@@ -364,6 +364,8 @@ import streamlit as st
 import requests
 from datetime import datetime
 import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 BACKEND_URL = "https://cvmuu2vznj.ap-southeast-1.awsapprunner.com/api/v1/chat"
 BACKEND_BASE_URL = "https://cvmuu2vznj.ap-southeast-1.awsapprunner.com"
@@ -395,13 +397,45 @@ if "session_info" not in st.session_state:
 if "loading_history" not in st.session_state:
     st.session_state.loading_history = False
     
-# NEW: Flag to track if initial load is complete
+# Flag to track if initial load is complete
 if "initial_load_complete" not in st.session_state:
     st.session_state.initial_load_complete = False
     
-# NEW: Flag to track if we need to force reload
+# Flag to track if we need to force reload
 if "force_reload_needed" not in st.session_state:
     st.session_state.force_reload_needed = False
+    
+# Track backend connection status
+if "backend_connected" not in st.session_state:
+    st.session_state.backend_connected = False
+    
+# Track retry attempts
+if "retry_count" not in st.session_state:
+    st.session_state.retry_count = 0
+
+# Function to create a session with retry logic
+def create_requests_session():
+    """Create a requests session with retry strategy"""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+# Function to check backend connection
+def check_backend_connection():
+    """Check if backend is accessible"""
+    try:
+        # Try to access the docs or a simple endpoint
+        response = requests.get(f"{BACKEND_BASE_URL}/docs", timeout=5)
+        return response.status_code == 200
+    except:
+        return False
 
 # Function to create a new session using backend API
 def create_backend_session(existing_session_id=None):
@@ -414,7 +448,8 @@ def create_backend_session(existing_session_id=None):
         if existing_session_id:
             payload = {"session_id": existing_session_id}
         
-        response = requests.post(
+        session = create_requests_session()
+        response = session.post(
             new_session_url,
             json=payload if payload else None,
             timeout=10
@@ -424,19 +459,30 @@ def create_backend_session(existing_session_id=None):
             data = response.json()
             session_id = data.get("session_id")
             
-            # Store session info
-            st.session_state.session_info = {
-                "created_at": data.get("created_at"),
-                "message_count": data.get("message_count", 0),
-                "updated_at": data.get("updated_at")
-            }
+            # Get session info immediately after creation
+            get_session_info(session_id)
+            
+            st.session_state.backend_connected = True
+            st.session_state.retry_count = 0
             
             return session_id
         else:
             st.error(f"Failed to create session: {response.status_code}")
             return None
+    except requests.exceptions.ConnectionError as e:
+        st.session_state.backend_connected = False
+        st.session_state.retry_count += 1
+        
+        if st.session_state.retry_count < 3:
+            st.warning(f"⚠️ Backend connection failed. Retrying... (Attempt {st.session_state.retry_count}/3)")
+            time.sleep(2)
+            return create_backend_session(existing_session_id)
+        else:
+            st.error("❌ Cannot connect to backend server. Please ensure it's running at http://127.0.0.1:8000")
+            return None
     except Exception as e:
         st.error(f"Error creating session: {e}")
+        st.session_state.backend_connected = False
         return None
 
 # Function to load conversation history
@@ -444,7 +490,8 @@ def load_conversation_history(session_id):
     """Load conversation history from backend using /sessions/{session_id}/history endpoint"""
     try:
         history_url = f"{BACKEND_BASE_URL}/api/v1/sessions/{session_id}/history"
-        response = requests.get(history_url, timeout=10)
+        session = create_requests_session()
+        response = session.get(history_url, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
@@ -461,6 +508,8 @@ def load_conversation_history(session_id):
             # Also get detailed session info
             get_session_info(session_id)
             
+            st.session_state.backend_connected = True
+            
             return True
         elif response.status_code == 404:
             # Session doesn't exist, create new one
@@ -469,20 +518,30 @@ def load_conversation_history(session_id):
                 st.session_state.session_id = new_session_id
                 st.query_params["session"] = new_session_id
                 return True
+            return False
+    except requests.exceptions.ConnectionError:
+        st.session_state.backend_connected = False
+        st.error("❌ Lost connection to backend server")
+        return False
     except Exception as e:
         st.error(f"Failed to load history: {e}")
         return False
 
-# Function to get session info
+# UPDATED: Function to get session info using your endpoint
 def get_session_info(session_id):
     """Get detailed session info using /sessions/{session_id}/info endpoint"""
     try:
         info_url = f"{BACKEND_BASE_URL}/api/v1/sessions/{session_id}/info"
-        response = requests.get(info_url, timeout=10)
+        session = create_requests_session()
+        response = session.get(info_url, timeout=10)
         
         if response.status_code == 200:
             st.session_state.session_info = response.json()
             return True
+        elif response.status_code == 404:
+            # Session not found, will need to create new one
+            st.session_state.session_info = None
+            return False
     except Exception as e:
         # Non-critical error, just log it
         print(f"Failed to get session info: {e}")
@@ -493,15 +552,66 @@ def delete_backend_session(session_id):
     """Delete session using /sessions/{session_id} endpoint"""
     try:
         delete_url = f"{BACKEND_BASE_URL}/api/v1/sessions/{session_id}"
-        response = requests.delete(delete_url, timeout=10)
+        session = create_requests_session()
+        response = session.delete(delete_url, timeout=10)
         return response.status_code == 200
     except Exception as e:
         st.error(f"Error deleting session: {e}")
         return False
 
+# NEW: Function to calculate expiration status
+def get_expiration_status(session_info):
+    """Calculate expiration status from session info"""
+    if not session_info:
+        return "Unknown", 0
+    
+    # Check if session_info has expiration fields
+    created_at = session_info.get('created_at')
+    expires_at = session_info.get('expires_at')
+    expires_in_seconds = session_info.get('expires_in_seconds')
+    
+    if expires_in_seconds is not None:
+        hours = expires_in_seconds / 3600
+        if expires_in_seconds <= 0:
+            return "Expired", 0
+        elif expires_in_seconds < 300:  # Less than 5 minutes
+            return "Expiring soon", hours
+        else:
+            return "Active", hours
+    elif expires_at and created_at:
+        # Calculate based on timestamps if available
+        try:
+            # Parse timestamps (adjust format as needed)
+            created = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            expires = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+            remaining = (expires - datetime.now().astimezone()).total_seconds()
+            hours = remaining / 3600
+            if remaining <= 0:
+                return "Expired", 0
+            elif remaining < 300:
+                return "Expiring soon", hours
+            else:
+                return "Active", hours
+        except:
+            return "Active", 24  # Default to 24 hours if can't parse
+    else:
+        return "Active", 24  # Default to 24 hours
+
 # Sidebar for session management
 with st.sidebar:
     st.header("🔐 Session Management")
+    
+    # Display backend connection status
+    if st.session_state.backend_connected:
+        st.success("✅ Backend Connected")
+    else:
+        st.error("❌ Backend Disconnected")
+        if st.button("🔄 Retry Connection", use_container_width=True):
+            st.session_state.retry_count = 0
+            st.session_state.initial_load_complete = False
+            st.rerun()
+    
+    st.divider()
     
     # Display current session info
     if st.session_state.session_id:
@@ -521,7 +631,7 @@ with st.sidebar:
                     st.session_state.session_id = new_session_id
                     st.session_state.messages = []
                     st.session_state.session_info = None
-                    st.session_state.initial_load_complete = False  # Reset initial load flag
+                    st.session_state.initial_load_complete = False
                     st.query_params["session"] = new_session_id
                     st.rerun()
                 else:
@@ -539,20 +649,40 @@ with st.sidebar:
                         st.session_state.session_id = new_session_id
                         st.session_state.messages = []
                         st.session_state.session_info = None
-                        st.session_state.initial_load_complete = False  # Reset initial load flag
+                        st.session_state.initial_load_complete = False
                         st.query_params["session"] = new_session_id
                         time.sleep(1)
                         st.rerun()
                 else:
                     st.error("Failed to delete session")
     
-    # Session info expander
+    # UPDATED: Session info expander with proper expiration display
     if st.session_state.session_info:
         with st.expander("📊 Session Info"):
             info = st.session_state.session_info
-            st.markdown(f"**Created:** {info.get('created_at', 'N/A')[:10]}")
+            st.markdown(f"**Created:** {info.get('created_at', 'N/A')}")
             st.markdown(f"**Messages:** {info.get('message_count', 0)}")
-            st.markdown(f"**Expires:** {info.get('expires_in_hours', 0):.1f} hours")
+            
+            # Display expiration information
+            status, hours = get_expiration_status(info)
+            
+            if status == "Expired":
+                st.markdown(f"**Status:** ❌ Expired")
+                if st.button("🔄 Create New Session", use_container_width=True):
+                    new_session_id = create_backend_session()
+                    if new_session_id:
+                        st.session_state.session_id = new_session_id
+                        st.session_state.messages = []
+                        st.query_params["session"] = new_session_id
+                        st.rerun()
+            elif status == "Expiring soon":
+                st.markdown(f"**Status:** ⚠️ {status}")
+                st.markdown(f"**Expires in:** {hours:.1f} hours ({hours*60:.0f} minutes)")
+                st.progress(max(0, min(1, hours/24)), text=f"{hours:.1f}h remaining")
+            else:
+                st.markdown(f"**Status:** ✅ {status}")
+                st.markdown(f"**Expires in:** {hours:.1f} hours")
+                st.progress(max(0, min(1, hours/24)), text=f"{hours:.1f}h remaining")
             
             if info.get('topics'):
                 st.markdown("**Recent Topics:**")
@@ -572,15 +702,22 @@ with st.sidebar:
 st.title("🏠 LeaseMate Policy Assistant")
 st.caption("General Policy | JES | REASONING")
 
-# MODIFIED: Ensure session exists on backend when app starts with force reload
-if not st.session_state.initial_load_complete:
+# Check backend connection first
+if not st.session_state.backend_connected:
+    st.warning("⚠️ Waiting for backend connection...")
+    if check_backend_connection():
+        st.session_state.backend_connected = True
+        st.session_state.initial_load_complete = False
+        st.rerun()
+
+# Ensure session exists on backend when app starts with force reload
+if not st.session_state.initial_load_complete and st.session_state.backend_connected:
     with st.spinner("Initializing session..."):
         if st.session_state.session_id:
             # Try to load existing session
             if load_conversation_history(st.session_state.session_id):
                 st.session_state.session_created = True
                 st.session_state.initial_load_complete = True
-                # NEW: Set force reload flag after successful initial load
                 st.session_state.force_reload_needed = True
             else:
                 # Session might be expired, create new one
@@ -591,7 +728,6 @@ if not st.session_state.initial_load_complete:
                     st.query_params["session"] = new_session_id
                     st.session_state.session_created = True
                     st.session_state.initial_load_complete = True
-                    # NEW: Set force reload flag after successful initial load
                     st.session_state.force_reload_needed = True
         else:
             # No session ID, create new one
@@ -601,17 +737,14 @@ if not st.session_state.initial_load_complete:
                 st.query_params["session"] = new_session_id
                 st.session_state.session_created = True
                 st.session_state.initial_load_complete = True
-                # NEW: Set force reload flag after successful initial load
                 st.session_state.force_reload_needed = True
 
-# NEW: Perform force reload after initial load is complete
-if st.session_state.force_reload_needed:
-    st.session_state.force_reload_needed = False  # Reset flag to prevent infinite loop
+# Perform force reload after initial load is complete
+if st.session_state.force_reload_needed and st.session_state.backend_connected:
+    st.session_state.force_reload_needed = False
     with st.spinner("Force reloading session data..."):
-        # Load conversation history again to ensure fresh data
         if st.session_state.session_id:
             load_conversation_history(st.session_state.session_id)
-            # Add a small delay to ensure UI updates properly
             time.sleep(0.5)
             st.rerun()
 
@@ -621,6 +754,36 @@ if st.session_state.loading_history and st.session_state.session_id:
         load_conversation_history(st.session_state.session_id)
         st.session_state.loading_history = False
         st.rerun()
+
+# Display connection warning if backend is down
+if not st.session_state.backend_connected:
+    st.error("""
+    ### 🔌 Backend Server Not Connected
+    
+    Please ensure your FastAPI backend is running:
+    
+    1. Open a terminal
+    2. Navigate to your backend directory
+    3. Run: `uvicorn main:app --reload --port 8000`
+    4. Refresh this page
+    
+    If you're using a different port or URL, update the BACKEND_URL variables in the code.
+    """)
+    st.stop()
+
+# Check if session is expired before displaying messages
+if st.session_state.session_info:
+    status, _ = get_expiration_status(st.session_state.session_info)
+    if status == "Expired":
+        st.warning("⚠️ Your session has expired. Please create a new session.")
+        if st.button("🆕 Create New Session"):
+            new_session_id = create_backend_session()
+            if new_session_id:
+                st.session_state.session_id = new_session_id
+                st.session_state.messages = []
+                st.query_params["session"] = new_session_id
+                st.rerun()
+        st.stop()
 
 # Display chat messages
 for msg in st.session_state.messages:
@@ -633,6 +796,17 @@ if prompt := st.chat_input("Ask a question about your lease policies"):
         st.error("No active session. Please refresh the page.")
         st.stop()
     
+    if not st.session_state.backend_connected:
+        st.error("Backend not connected. Please check your server.")
+        st.stop()
+    
+    # Check if session is expired before sending message
+    if st.session_state.session_info:
+        status, _ = get_expiration_status(st.session_state.session_info)
+        if status == "Expired":
+            st.error("Your session has expired. Please create a new session.")
+            st.stop()
+    
     # Add user message to UI
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({
@@ -644,7 +818,8 @@ if prompt := st.chat_input("Ask a question about your lease policies"):
     with st.spinner("Searching policies..."):
         try:
             # Send request with session_id
-            response = requests.post(
+            session = create_requests_session()
+            response = session.post(
                 BACKEND_URL,
                 json={
                     "prompt": prompt,
@@ -693,18 +868,26 @@ if prompt := st.chat_input("Ask a question about your lease policies"):
             else:
                 st.error(f"❌ Backend returned an error: {response.status_code}")
 
-        except requests.exceptions.RequestException as e:
-            st.error(f"❌ Connection failed: {e}")
+        except requests.exceptions.ConnectionError:
+            st.error("❌ Lost connection to backend server")
+            st.session_state.backend_connected = False
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
 
 # Footer with session stats
-if st.session_state.session_id:
+if st.session_state.session_id and st.session_state.backend_connected and st.session_state.session_info:
     st.divider()
     col1, col2, col3 = st.columns(3)
     with col1:
         st.caption(f"💬 Messages: {len(st.session_state.messages)}")
     with col2:
-        if st.session_state.session_info:
-            expires = st.session_state.session_info.get('expires_in_hours', 0)
-            st.caption(f"⏱️ Expires: {expires:.1f}h")
+        status, hours = get_expiration_status(st.session_state.session_info)
+        if status == "Expired":
+            st.caption(f"⏱️ Session: Expired")
+        elif status == "Expiring soon":
+            st.caption(f"⏱️ Expires: {hours:.1f}h ⚠️")
+        else:
+            st.caption(f"⏱️ Expires: {hours:.1f}h")
     with col3:
         st.caption(f"🔑 Session active")
