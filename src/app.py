@@ -394,6 +394,14 @@ if "session_info" not in st.session_state:
     
 if "loading_history" not in st.session_state:
     st.session_state.loading_history = False
+    
+# NEW: Flag to track if initial load is complete
+if "initial_load_complete" not in st.session_state:
+    st.session_state.initial_load_complete = False
+    
+# NEW: Flag to track if we need to force reload
+if "force_reload_needed" not in st.session_state:
+    st.session_state.force_reload_needed = False
 
 # Function to create a new session using backend API
 def create_backend_session(existing_session_id=None):
@@ -513,6 +521,7 @@ with st.sidebar:
                     st.session_state.session_id = new_session_id
                     st.session_state.messages = []
                     st.session_state.session_info = None
+                    st.session_state.initial_load_complete = False  # Reset initial load flag
                     st.query_params["session"] = new_session_id
                     st.rerun()
                 else:
@@ -530,6 +539,7 @@ with st.sidebar:
                         st.session_state.session_id = new_session_id
                         st.session_state.messages = []
                         st.session_state.session_info = None
+                        st.session_state.initial_load_complete = False  # Reset initial load flag
                         st.query_params["session"] = new_session_id
                         time.sleep(1)
                         st.rerun()
@@ -562,13 +572,16 @@ with st.sidebar:
 st.title("🏠 LeaseMate Policy Assistant")
 st.caption("General Policy | JES | REASONING")
 
-# Ensure session exists on backend when app starts
-if not st.session_state.session_created:
+# MODIFIED: Ensure session exists on backend when app starts with force reload
+if not st.session_state.initial_load_complete:
     with st.spinner("Initializing session..."):
         if st.session_state.session_id:
             # Try to load existing session
             if load_conversation_history(st.session_state.session_id):
                 st.session_state.session_created = True
+                st.session_state.initial_load_complete = True
+                # NEW: Set force reload flag after successful initial load
+                st.session_state.force_reload_needed = True
             else:
                 # Session might be expired, create new one
                 new_session_id = create_backend_session()
@@ -577,6 +590,9 @@ if not st.session_state.session_created:
                     st.session_state.messages = []
                     st.query_params["session"] = new_session_id
                     st.session_state.session_created = True
+                    st.session_state.initial_load_complete = True
+                    # NEW: Set force reload flag after successful initial load
+                    st.session_state.force_reload_needed = True
         else:
             # No session ID, create new one
             new_session_id = create_backend_session()
@@ -584,6 +600,20 @@ if not st.session_state.session_created:
                 st.session_state.session_id = new_session_id
                 st.query_params["session"] = new_session_id
                 st.session_state.session_created = True
+                st.session_state.initial_load_complete = True
+                # NEW: Set force reload flag after successful initial load
+                st.session_state.force_reload_needed = True
+
+# NEW: Perform force reload after initial load is complete
+if st.session_state.force_reload_needed:
+    st.session_state.force_reload_needed = False  # Reset flag to prevent infinite loop
+    with st.spinner("Force reloading session data..."):
+        # Load conversation history again to ensure fresh data
+        if st.session_state.session_id:
+            load_conversation_history(st.session_state.session_id)
+            # Add a small delay to ensure UI updates properly
+            time.sleep(0.5)
+            st.rerun()
 
 # Load history if triggered by refresh button
 if st.session_state.loading_history and st.session_state.session_id:
