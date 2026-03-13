@@ -413,6 +413,66 @@ if "backend_connected" not in st.session_state:
 if "retry_count" not in st.session_state:
     st.session_state.retry_count = 0
 
+# Very fast typing effect settings (no user controls)
+TYPING_SPEED = 0.003  # Very fast - 0.003 seconds per character (about 333 chars per second)
+
+# Function to display text with very fast typing effect
+def typewriter_text(text):
+    """Display text with a very fast typewriter effect"""
+    # Create a placeholder for the typing effect
+    type_placeholder = st.empty()
+    
+    # Display characters very quickly
+    displayed_text = ""
+    for char in text:
+        displayed_text += char
+        type_placeholder.markdown(displayed_text + "▌")  # Add cursor
+        time.sleep(TYPING_SPEED)
+    
+    # Remove cursor and show final text
+    type_placeholder.markdown(text)
+    return text
+
+# Function to display assistant response with very fast typing effect
+def display_assistant_response(answer, sources, base_url):
+    """Display assistant response with very fast typing effect for the answer"""
+    
+    with st.chat_message("assistant"):
+        # Display "Answer" header first
+        st.markdown("### Answer")
+        
+        # Apply very fast typing effect to the answer
+        # Use a placeholder for the answer with typing effect
+        answer_placeholder = st.empty()
+        
+        # Type out the answer very quickly
+        displayed_answer = ""
+        for char in answer:
+            displayed_answer += char
+            answer_placeholder.markdown(displayed_answer + "▌")
+            time.sleep(TYPING_SPEED)
+        
+        # Show final answer without cursor
+        answer_placeholder.markdown(displayed_answer)
+        
+        # Display sources (these appear instantly after typing completes)
+        if sources:
+            with st.expander("📌 Sources"):
+                for src in sources:
+                    file_name = src.get("file_name", "Unknown document")
+                    download_url = src.get("download_url")
+                    
+                    st.markdown(f"**📄 {file_name}**")
+                    
+                    if download_url:
+                        full_url = f"{base_url}{download_url}"
+                        st.markdown(
+                            f"[⬇️ Source]({full_url})",
+                            unsafe_allow_html=True
+                        )
+                    
+                    st.markdown("---")
+
 # Function to create a session with retry logic
 def create_requests_session():
     """Create a requests session with retry strategy"""
@@ -837,27 +897,8 @@ if prompt := st.chat_input("Ask a question about your lease policies"):
                 # Refresh session info after message
                 get_session_info(st.session_state.session_id)
 
-                # Display assistant response
-                with st.chat_message("assistant"):
-                    st.markdown("### Answer")
-                    st.markdown(answer)
-
-                    if sources:
-                        with st.expander("📌 Sources"):
-                            for src in sources:
-                                file_name = src.get("file_name", "Unknown document")
-                                download_url = src.get("download_url")
-
-                                st.markdown(f"**📄 {file_name}**")
-
-                                if download_url:
-                                    full_url = f"{BACKEND_BASE_URL}{download_url}"
-                                    st.markdown(
-                                        f"[⬇️ Source]({full_url})",
-                                        unsafe_allow_html=True
-                                    )
-
-                                st.markdown("---")
+                # Display assistant response with very fast typing effect
+                display_assistant_response(answer, sources, BACKEND_BASE_URL)
 
                 # Add assistant message to session state
                 st.session_state.messages.append({
