@@ -367,8 +367,8 @@ import time
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-BACKEND_URL = "https://cvmuu2vznj.ap-southeast-1.awsapprunner.com/api/v1/chat"
-BACKEND_BASE_URL = "https://cvmuu2vznj.ap-southeast-1.awsapprunner.com"
+BACKEND_URL = "https://bybnd3phz8.ap-southeast-1.awsapprunner.com/api/v1/chat"
+BACKEND_BASE_URL = "https://bybnd3phz8.ap-southeast-1.awsapprunner.com"
 
 st.set_page_config(
     page_title="LeaseMate Policy Assistant",
